@@ -1,9 +1,12 @@
 import {
   createUserWithEmailAndPassword,
+  EmailAuthProvider,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
+  updatePassword,
   User,
 } from 'firebase/auth';
 import { auth, isFirebaseConfigured } from './firebaseConfig';
@@ -26,7 +29,8 @@ export async function loginWithEmail(
   if (!isFirebaseConfigured || !auth) {
     return {
       ok: false,
-      message: 'Configura primero tus credenciales de Firebase en firebaseConfig.ts.',
+      message:
+        'Configura primero tus credenciales de Firebase en firebaseConfig.ts.',
     };
   }
 
@@ -60,7 +64,8 @@ export async function registerWithEmail(
   if (!isFirebaseConfigured || !auth) {
     return {
       ok: false,
-      message: 'Configura primero tus credenciales de Firebase en firebaseConfig.ts.',
+      message:
+        'Configura primero tus credenciales de Firebase en firebaseConfig.ts.',
     };
   }
 
@@ -77,7 +82,10 @@ export async function registerWithEmail(
       return { ok: false, message: 'Ese correo ya está registrado.' };
     }
     if (code === 'auth/weak-password') {
-      return { ok: false, message: 'La contraseña debe tener al menos 6 caracteres.' };
+      return {
+        ok: false,
+        message: 'La contraseña debe tener al menos 6 caracteres.',
+      };
     }
     if (code === 'auth/invalid-email') {
       return { ok: false, message: 'Ingresa un correo electrónico válido.' };
@@ -92,7 +100,8 @@ export async function sendPasswordReset(
   if (!isFirebaseConfigured || !auth) {
     return {
       ok: false,
-      message: 'Configura primero tus credenciales de Firebase en firebaseConfig.ts.',
+      message:
+        'Configura primero tus credenciales de Firebase en firebaseConfig.ts.',
     };
   }
 
@@ -129,6 +138,104 @@ export async function sendPasswordReset(
     return {
       ok: false,
       message: 'No fue posible enviar el correo de recuperación.',
+    };
+  }
+}
+
+export async function changeUserPassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<{ ok: boolean; message: string }> {
+  if (!isFirebaseConfigured || !auth) {
+    return {
+      ok: false,
+      message:
+        'Configura primero tus credenciales de Firebase en firebaseConfig.ts.',
+    };
+  }
+
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    return {
+      ok: false,
+      message: 'Debes iniciar sesión para cambiar tu contraseña.',
+    };
+  }
+
+  if (!currentPassword) {
+    return {
+      ok: false,
+      message: 'Ingresa tu contraseña actual para confirmar el cambio.',
+    };
+  }
+
+  if (newPassword.trim().length < 6) {
+    return {
+      ok: false,
+      message: 'La nueva contraseña debe tener al menos 6 caracteres.',
+    };
+  }
+
+  try {
+    await updatePassword(currentUser, newPassword.trim());
+    return {
+      ok: true,
+      message: 'Contraseña actualizada correctamente.',
+    };
+  } catch (error: unknown) {
+    const code =
+      typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: string }).code)
+        : '';
+
+    if (code === 'auth/requires-recent-login' && currentUser.email) {
+      try {
+        const credential = EmailAuthProvider.credential(
+          currentUser.email,
+          currentPassword
+        );
+        await reauthenticateWithCredential(currentUser, credential);
+        await updatePassword(currentUser, newPassword.trim());
+        return {
+          ok: true,
+          message: 'Contraseña actualizada correctamente.',
+        };
+      } catch (reauthError: unknown) {
+        const reauthCode =
+          typeof reauthError === 'object' &&
+          reauthError !== null &&
+          'code' in reauthError
+            ? String((reauthError as { code?: string }).code)
+            : '';
+
+        if (
+          reauthCode === 'auth/wrong-password' ||
+          reauthCode === 'auth/invalid-credential'
+        ) {
+          return {
+            ok: false,
+            message: 'La contraseña actual no es correcta.',
+          };
+        }
+
+        return {
+          ok: false,
+          message:
+            'No se pudo reautenticar tu cuenta. Vuelve a iniciar sesión e inténtalo de nuevo.',
+        };
+      }
+    }
+
+    if (code === 'auth/weak-password') {
+      return {
+        ok: false,
+        message: 'La nueva contraseña debe tener al menos 6 caracteres.',
+      };
+    }
+
+    return {
+      ok: false,
+      message: 'No fue posible actualizar la contraseña.',
     };
   }
 }

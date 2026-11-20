@@ -1,7 +1,9 @@
+import { Ionicons } from '@expo/vector-icons';
+import { User } from 'firebase/auth';
 import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { User } from 'firebase/auth';
 import {
+  changeUserPassword,
   loginWithEmail,
   logoutUser,
   registerWithEmail,
@@ -16,12 +18,28 @@ export default function AuthPanel() {
   const [isResetMode, setIsResetMode] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+
+  // Estados para cambiar contraseña estando logueado
+  const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
+  const [currentPasswordInput, setCurrentPasswordInput] = useState('');
+  const [newPasswordInput, setNewPasswordInput] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     const unsubscribe = subscribeToAuthState((currentUser: User | null) => {
       setUser(currentUser);
+      if (!currentUser) {
+        setIsChangePasswordOpen(false);
+        setCurrentPasswordInput('');
+        setNewPasswordInput('');
+        setShowCurrentPassword(false);
+        setShowNewPassword(false);
+      }
     });
     return unsubscribe;
   }, []);
@@ -52,11 +70,35 @@ export default function AuthPanel() {
 
     if (result.ok) {
       setPassword('');
+      setShowPassword(false);
+    }
+  };
+
+  const handlePasswordUpdate = async () => {
+    setSubmitting(true);
+    setStatusMessage(null);
+
+    const result = await changeUserPassword(
+      currentPasswordInput,
+      newPasswordInput
+    );
+
+    setSubmitting(false);
+    setStatusMessage(result.message);
+
+    if (result.ok) {
+      setCurrentPasswordInput('');
+      setNewPasswordInput('');
+      setShowCurrentPassword(false);
+      setShowNewPassword(false);
+      setIsChangePasswordOpen(false);
     }
   };
 
   const handleLogout = async () => {
     await logoutUser();
+    setShowPassword(false);
+    setIsChangePasswordOpen(false);
     setStatusMessage('Sesión cerrada.');
   };
 
@@ -69,18 +111,110 @@ export default function AuthPanel() {
   return (
     <View style={styles.container}>
       {user ? (
-        <View style={styles.loggedInRow}>
-          <View style={styles.statusGroup}>
-            <Text style={styles.statusLabel}>Cuenta activa: {user.email}</Text>
-            {!isFirebaseConfigured && (
-              <Text style={styles.hintText}>
-                Firebase pendiente de credenciales
-              </Text>
-            )}
+        <View style={styles.loggedInBlock}>
+          <View style={styles.loggedInRow}>
+            <View style={styles.statusGroup}>
+              <Text style={styles.statusLabel}>Cuenta activa: {user.email}</Text>
+              {!isFirebaseConfigured && (
+                <Text style={styles.hintText}>
+                  Firebase pendiente de credenciales
+                </Text>
+              )}
+            </View>
+            <Pressable onPress={handleLogout} style={styles.secondaryButton}>
+              <Text style={styles.secondaryButtonText}>Salir</Text>
+            </Pressable>
           </View>
-          <Pressable onPress={handleLogout} style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>Salir</Text>
+
+          <Pressable
+            onPress={() => {
+              setIsChangePasswordOpen((prev) => !prev);
+              setStatusMessage(null);
+            }}
+            style={styles.changePasswordToggleBtn}
+          >
+            <Ionicons
+              name={isChangePasswordOpen ? 'chevron-up' : 'key-outline'}
+              size={16}
+              color="#1b4332"
+            />
+            <Text style={styles.changePasswordToggleText}>
+              {isChangePasswordOpen
+                ? 'Ocultar cambio de contraseña'
+                : 'Cambiar contraseña'}
+            </Text>
           </Pressable>
+
+          {isChangePasswordOpen && (
+            <View style={styles.changePasswordBox}>
+              <Text style={styles.changePasswordTitle}>
+                Actualizar contraseña
+              </Text>
+
+              <TextInput
+                value={user.email ?? ''}
+                editable={false}
+                selectTextOnFocus={false}
+                style={[styles.input, styles.disabledEmailInput]}
+              />
+
+              <View style={styles.passwordContainer}>
+                <TextInput
+                  value={currentPasswordInput}
+                  onChangeText={setCurrentPasswordInput}
+                  placeholder="Contraseña actual"
+                  placeholderTextColor="#6c757d"
+                  secureTextEntry={!showCurrentPassword}
+                  autoCapitalize="none"
+                  style={styles.passwordInput}
+                />
+                <Pressable
+                  onPress={() => setShowCurrentPassword((prev) => !prev)}
+                  hitSlop={8}
+                  style={styles.eyeButton}
+                >
+                  <Ionicons
+                    name={showCurrentPassword ? 'eye-off-outline' : 'eye-outline'}
+                    size={20}
+                    color="#1b4332"
+                  />
+                </Pressable>
+              </View>
+
+              <View style={styles.passwordContainer}>
+                <TextInput
+                  value={newPasswordInput}
+                  onChangeText={setNewPasswordInput}
+                  placeholder="Nueva contraseña (mín. 6 caracteres)"
+                  placeholderTextColor="#6c757d"
+                  secureTextEntry={!showNewPassword}
+                  autoCapitalize="none"
+                  style={styles.passwordInput}
+                />
+                <Pressable
+                  onPress={() => setShowNewPassword((prev) => !prev)}
+                  hitSlop={8}
+                  style={styles.eyeButton}
+                >
+                  <Ionicons
+                    name={showNewPassword ? 'eye-off-outline' : 'eye-outline'}
+                    size={20}
+                    color="#1b4332"
+                  />
+                </Pressable>
+              </View>
+
+              <Pressable
+                onPress={handlePasswordUpdate}
+                disabled={submitting}
+                style={styles.submitButton}
+              >
+                <Text style={styles.primaryButtonText}>
+                  {submitting ? 'Guardando...' : 'Guardar nueva contraseña'}
+                </Text>
+              </Pressable>
+            </View>
+          )}
         </View>
       ) : (
         <View style={styles.formBox}>
@@ -102,14 +236,28 @@ export default function AuthPanel() {
           />
 
           {!isResetMode && (
-            <TextInput
-              value={password}
-              onChangeText={setPassword}
-              placeholder="Contraseña (mín. 6 caracteres)"
-              placeholderTextColor="#6c757d"
-              secureTextEntry
-              style={styles.input}
-            />
+            <View style={styles.passwordContainer}>
+              <TextInput
+                value={password}
+                onChangeText={setPassword}
+                placeholder="Contraseña (mín. 6 caracteres)"
+                placeholderTextColor="#6c757d"
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                style={styles.passwordInput}
+              />
+              <Pressable
+                onPress={() => setShowPassword((prev) => !prev)}
+                hitSlop={8}
+                style={styles.eyeButton}
+              >
+                <Ionicons
+                  name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                  size={20}
+                  color="#1b4332"
+                />
+              </Pressable>
+            </View>
           )}
 
           {!isRegisterMode && (
@@ -117,6 +265,7 @@ export default function AuthPanel() {
               onPress={() => {
                 setIsResetMode((prev) => !prev);
                 setPassword('');
+                setShowPassword(false);
                 setStatusMessage(null);
               }}
               style={styles.forgotLinkButton}
@@ -177,6 +326,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#dee2e6',
   },
+  loggedInBlock: {
+    gap: 10,
+  },
   loggedInRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -190,6 +342,40 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: '#212529',
+  },
+  changePasswordToggleBtn: {
+    flexDirection: 'row',
+    gap: 6,
+    backgroundColor: '#edf6f0',
+    borderWidth: 1,
+    borderColor: '#b7d7c2',
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  changePasswordToggleText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1b4332',
+  },
+  changePasswordBox: {
+    backgroundColor: '#f8fbf9',
+    borderWidth: 1,
+    borderColor: '#dcebe2',
+    borderRadius: 10,
+    padding: 10,
+    gap: 8,
+  },
+  changePasswordTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1b4332',
+  },
+  disabledEmailInput: {
+    backgroundColor: '#e9ecef',
+    color: '#495057',
   },
   formTitle: {
     fontSize: 15,
@@ -238,6 +424,27 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     fontSize: 13,
     color: '#212529',
+  },
+  passwordContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1,
+    borderColor: '#ced4da',
+    borderRadius: 8,
+  },
+  passwordInput: {
+    flex: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 13,
+    color: '#212529',
+  },
+  eyeButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   actionsRow: {
     flexDirection: 'row',

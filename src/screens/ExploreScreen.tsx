@@ -1,11 +1,14 @@
+import { Ionicons } from '@expo/vector-icons';
 import { onAuthStateChanged } from 'firebase/auth';
 import * as Location from 'expo-location';
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Image,
+  KeyboardAvoidingView,
   Linking,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -35,7 +38,8 @@ import {
 } from '../services/reviewsService';
 import { auth } from '../services/firebaseConfig';
 
-type SingleFilter = 'Todos' | 'Favoritos' | 'Visitados' | Destination['locality'];
+type QuickListMode = 'all' | 'favorites' | 'visited';
+type OpenFilterMenu = 'locality' | 'category' | null;
 
 const LOCALITY_FILTERS: Destination['locality'][] = [
   'Suba',
@@ -97,7 +101,13 @@ async function openInWaze(latitude: number, longitude: number) {
 
 export default function ExploreScreen() {
   const [destinations, setDestinations] = useState<Destination[]>(DESTINATIONS);
-  const [activeFilter, setActiveFilter] = useState<SingleFilter>('Todos');
+  const [quickListMode, setQuickListMode] = useState<QuickListMode>('all');
+  const [selectedLocality, setSelectedLocality] = useState<
+    Destination['locality'] | null
+  >(null);
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [openFilterMenu, setOpenFilterMenu] = useState<OpenFilterMenu>(null);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDestinationId, setSelectedDestinationId] = useState<
     string | null
@@ -113,10 +123,12 @@ export default function ExploreScreen() {
     tone: 'success' | 'warning';
   } | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const welcomeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
   const [hasEnteredApp, setHasEnteredApp] = useState(false);
+  const previousUserIdRef = useRef<string | null>(null);
 
   // Estados de calificación y comentarios
   const [isRatingModalVisible, setIsRatingModalVisible] = useState(false);
@@ -136,9 +148,14 @@ export default function ExploreScreen() {
     'destination' | 'user' | 'route'
   >('destination');
 
+  const categoryOptions = Array.from(
+    new Set(destinations.map((item) => item.category).filter(Boolean))
+  );
+
   const showBubbleNotice = (
     text: string,
-    tone: 'success' | 'warning' = 'success'
+    tone: 'success' | 'warning' = 'success',
+    durationMs = 3800
   ) => {
     setToastBanner({ text, tone });
     if (toastTimeoutRef.current) {
@@ -146,13 +163,16 @@ export default function ExploreScreen() {
     }
     toastTimeoutRef.current = setTimeout(() => {
       setToastBanner(null);
-    }, 2600);
+    }, durationMs);
   };
 
   useEffect(() => {
     return () => {
       if (toastTimeoutRef.current) {
         clearTimeout(toastTimeoutRef.current);
+      }
+      if (welcomeTimeoutRef.current) {
+        clearTimeout(welcomeTimeoutRef.current);
       }
     };
   }, []);
@@ -187,7 +207,24 @@ export default function ExploreScreen() {
       setCurrentUserEmail(user?.email ?? null);
 
       if (user) {
+        const isNewSignIn = previousUserIdRef.current !== user.uid;
+        previousUserIdRef.current = user.uid;
         setHasEnteredApp(true);
+
+        if (isNewSignIn) {
+          const userAlias = user.email ? user.email.split('@')[0] : 'explorador';
+          if (welcomeTimeoutRef.current) {
+            clearTimeout(welcomeTimeoutRef.current);
+          }
+          welcomeTimeoutRef.current = setTimeout(() => {
+            showBubbleNotice(
+              `¡Bienvenido/a, ${userAlias}! Qué bueno tenerte en Turismo Sostenible Bogotá.`,
+              'success',
+              3800
+            );
+          }, 150);
+        }
+
         const [favs, visited] = await Promise.all([
           fetchUserFavoriteIds(user.uid),
           fetchUserVisitedIds(user.uid),
@@ -197,10 +234,11 @@ export default function ExploreScreen() {
           setVisitedIds(visited);
         }
       } else {
+        previousUserIdRef.current = null;
         setFavoriteIds([]);
         setVisitedIds([]);
-        setActiveFilter((prev) =>
-          prev === 'Favoritos' || prev === 'Visitados' ? 'Todos' : prev
+        setQuickListMode((prev) =>
+          prev === 'favorites' || prev === 'visited' ? 'all' : prev
         );
       }
     });
@@ -325,24 +363,28 @@ export default function ExploreScreen() {
     }
   };
 
-  const handleSelectSingleFilter = (nextFilter: SingleFilter) => {
+  const handleToggleQuickList = (targetMode: 'favorites' | 'visited') => {
     setFavoriteNotice(null);
+    setOpenFilterMenu(null);
 
-    if (nextFilter === 'Favoritos' && !currentUserEmail) {
+    const nextMode: QuickListMode =
+      quickListMode === targetMode ? 'all' : targetMode;
+
+    if (nextMode === 'favorites' && !currentUserEmail) {
       const msg =
         'Debes iniciar sesión para consultar y guardar tus destinos favoritos.';
       setFavoriteNotice(msg);
       showBubbleNotice(msg, 'warning');
     }
 
-    if (nextFilter === 'Visitados' && !currentUserEmail) {
+    if (nextMode === 'visited' && !currentUserEmail) {
       const msg =
         'Debes iniciar sesión para consultar y guardar tu histórico de sitios visitados.';
       setFavoriteNotice(msg);
       showBubbleNotice(msg, 'warning');
     }
 
-    setActiveFilter(nextFilter);
+    setQuickListMode(nextMode);
   };
 
   const handleToggleFavorite = async (destination: Destination) => {
@@ -420,14 +462,17 @@ export default function ExploreScreen() {
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
   const filteredDestinations = destinations.filter((item) => {
-    let matchesFilter = true;
-    if (activeFilter === 'Favoritos') {
-      matchesFilter = favoriteIds.includes(item.id);
-    } else if (activeFilter === 'Visitados') {
-      matchesFilter = visitedIds.includes(item.id);
-    } else if (activeFilter !== 'Todos') {
-      matchesFilter = item.locality === activeFilter;
+    let matchesQuickList = true;
+    if (quickListMode === 'favorites') {
+      matchesQuickList = favoriteIds.includes(item.id);
+    } else if (quickListMode === 'visited') {
+      matchesQuickList = visitedIds.includes(item.id);
     }
+
+    const matchesLocality =
+      !selectedLocality || item.locality === selectedLocality;
+    const matchesCategory =
+      !selectedCategory || item.category === selectedCategory;
 
     const matchesSearch =
       normalizedQuery === '' ||
@@ -435,7 +480,7 @@ export default function ExploreScreen() {
       item.category.toLowerCase().includes(normalizedQuery) ||
       item.description.toLowerCase().includes(normalizedQuery);
 
-    return matchesFilter && matchesSearch;
+    return matchesQuickList && matchesLocality && matchesCategory && matchesSearch;
   });
 
   const nearestDestinationInfo =
@@ -475,10 +520,16 @@ export default function ExploreScreen() {
   };
 
   const hasActiveFilters =
-    activeFilter !== 'Todos' || searchQuery.trim().length > 0;
+    quickListMode !== 'all' ||
+    Boolean(selectedLocality) ||
+    Boolean(selectedCategory) ||
+    searchQuery.trim().length > 0;
 
   const handleClearFilters = () => {
-    setActiveFilter('Todos');
+    setQuickListMode('all');
+    setSelectedLocality(null);
+    setSelectedCategory(null);
+    setOpenFilterMenu(null);
     setSearchQuery('');
     setSelectedDestinationId(null);
     setModalDestinationId(null);
@@ -555,57 +606,79 @@ export default function ExploreScreen() {
 
   if (!hasEnteredApp) {
     return (
-      <ScrollView contentContainerStyle={styles.authScreenContainer}>
-        <View style={styles.authCard}>
-          <View style={styles.loginHeroWrapper}>
-            <Image
-              source={require('../../assets/login-bogota-green.png')}
-              style={styles.loginHeroImage}
-              resizeMode="cover"
-            />
+      <KeyboardAvoidingView
+        style={styles.authKeyboardRoot}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <ScrollView
+          contentContainerStyle={styles.authScreenContainer}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.authCard}>
+            <View style={styles.loginHeroWrapper}>
+              <Image
+                source={require('../../assets/login-bogota-green.png')}
+                style={styles.loginHeroImage}
+                resizeMode="cover"
+              />
+            </View>
+
+            <View style={styles.authCardBody}>
+              <WelcomeHeader
+                isAuthenticated={Boolean(currentUserEmail)}
+                userEmail={currentUserEmail}
+                showLoginButton={false}
+              />
+
+              <AuthPanel />
+
+              <Pressable
+                onPress={() => setHasEnteredApp(true)}
+                style={styles.guestButton}
+              >
+                <Text style={styles.guestButtonText}>
+                  {currentUserEmail
+                    ? 'Continuar a destinos'
+                    : 'Entrar como invitado'}
+                </Text>
+              </Pressable>
+            </View>
           </View>
-
-          <View style={styles.authCardBody}>
-            <WelcomeHeader
-              isAuthenticated={Boolean(currentUserEmail)}
-              userEmail={currentUserEmail}
-              showLoginButton={false}
-            />
-
-            <AuthPanel />
-
-            <Pressable
-              onPress={() => setHasEnteredApp(true)}
-              style={styles.guestButton}
-            >
-              <Text style={styles.guestButtonText}>
-                {currentUserEmail
-                  ? 'Continuar a destinos'
-                  : 'Entrar como invitado'}
-              </Text>
-            </Pressable>
-          </View>
-        </View>
-      </ScrollView>
+        </ScrollView>
+      </KeyboardAvoidingView>
     );
   }
 
   return (
     <View style={styles.screenRoot}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <View style={styles.topSessionBar}>
-          <Text style={styles.sessionLabel} numberOfLines={1}>
-            {currentUserEmail ? `Cuenta: ${currentUserEmail}` : 'Modo invitado'}
-          </Text>
-          <Pressable
-            onPress={() => setHasEnteredApp(false)}
-            style={styles.switchAccountButton}
-          >
-            <Text style={styles.switchAccountText}>
-              {currentUserEmail ? 'Cuenta' : 'Iniciar sesión'}
+      <ScrollView
+        contentContainerStyle={styles.container}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Pressable
+          onPress={() => setHasEnteredApp(false)}
+          style={styles.topSessionBar}
+        >
+          <View style={styles.userAvatarCircle}>
+            <Ionicons
+              name={currentUserEmail ? 'person' : 'person-outline'}
+              size={18}
+              color="#1b4332"
+            />
+          </View>
+          <View style={styles.sessionInfoBox}>
+            <Text style={styles.sessionLabel} numberOfLines={1}>
+              {currentUserEmail ?? 'Modo invitado'}
             </Text>
-          </Pressable>
-        </View>
+            <Text style={styles.sessionSubLabel}>
+              {currentUserEmail
+                ? 'Toca para gestionar cuenta o contraseña'
+                : 'Toca para iniciar sesión'}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color="#2d6a4f" />
+        </Pressable>
 
         {favoriteNotice ? (
           <View style={styles.noticeBox}>
@@ -621,77 +694,199 @@ export default function ExploreScreen() {
           style={styles.searchInput}
         />
 
-        <View style={styles.filtersRow}>
-          <Pressable
-            onPress={() => handleSelectSingleFilter('Todos')}
-            style={[
-              styles.filterChip,
-              activeFilter === 'Todos' && styles.filterChipActive,
-            ]}
-          >
-            <Text
+        {/* Barra de filtros organizada + Submenú desplegable */}
+        <View style={styles.filtersSection}>
+          <View style={styles.filterTabsRow}>
+            <Pressable
+              onPress={() =>
+                setOpenFilterMenu((prev) =>
+                  prev === 'locality' ? null : 'locality'
+                )
+              }
               style={[
-                styles.filterText,
-                activeFilter === 'Todos' && styles.filterTextActive,
+                styles.filterTabBtn,
+                (openFilterMenu === 'locality' || Boolean(selectedLocality)) &&
+                  styles.filterTabBtnActive,
               ]}
             >
-              Todos
-            </Text>
-          </Pressable>
-
-          <Pressable
-            onPress={() => handleSelectSingleFilter('Favoritos')}
-            style={[
-              styles.filterChip,
-              activeFilter === 'Favoritos' && styles.filterChipActive,
-            ]}
-          >
-            <Text
-              style={[
-                styles.filterText,
-                activeFilter === 'Favoritos' && styles.filterTextActive,
-              ]}
-            >
-              Favoritos ({favoriteIds.length})
-            </Text>
-          </Pressable>
-
-          <Pressable
-            onPress={() => handleSelectSingleFilter('Visitados')}
-            style={[
-              styles.filterChip,
-              activeFilter === 'Visitados' && styles.filterChipActive,
-            ]}
-          >
-            <Text
-              style={[
-                styles.filterText,
-                activeFilter === 'Visitados' && styles.filterTextActive,
-              ]}
-            >
-              Visitados ({visitedIds.length})
-            </Text>
-          </Pressable>
-
-          {LOCALITY_FILTERS.map((locality) => {
-            const isActive = activeFilter === locality;
-            return (
-              <Pressable
-                key={locality}
-                onPress={() => handleSelectSingleFilter(locality)}
-                style={[styles.filterChip, isActive && styles.filterChipActive]}
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.filterTabText,
+                  (openFilterMenu === 'locality' || Boolean(selectedLocality)) &&
+                    styles.filterTabTextActive,
+                ]}
               >
-                <Text
+                {selectedLocality ? `📍 ${selectedLocality}` : 'Localidad'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => handleToggleQuickList('favorites')}
+              style={[
+                styles.filterTabBtn,
+                quickListMode === 'favorites' && styles.filterTabBtnActive,
+              ]}
+            >
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.filterTabText,
+                  quickListMode === 'favorites' && styles.filterTabTextActive,
+                ]}
+              >
+                Favoritos ({favoriteIds.length})
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => handleToggleQuickList('visited')}
+              style={[
+                styles.filterTabBtn,
+                quickListMode === 'visited' && styles.filterTabBtnActive,
+              ]}
+            >
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.filterTabText,
+                  quickListMode === 'visited' && styles.filterTabTextActive,
+                ]}
+              >
+                Visitados ({visitedIds.length})
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() =>
+                setOpenFilterMenu((prev) =>
+                  prev === 'category' ? null : 'category'
+                )
+              }
+              style={[
+                styles.filterTabBtn,
+                (openFilterMenu === 'category' || Boolean(selectedCategory)) &&
+                  styles.filterTabBtnActive,
+              ]}
+            >
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.filterTabText,
+                  (openFilterMenu === 'category' || Boolean(selectedCategory)) &&
+                    styles.filterTabTextActive,
+                ]}
+              >
+                {selectedCategory ? `🌿 ${selectedCategory}` : 'Categoría'}
+              </Text>
+            </Pressable>
+          </View>
+
+          {openFilterMenu === 'locality' && (
+            <View style={styles.subMenuBox}>
+              <Text style={styles.subMenuTitle}>Elige una localidad</Text>
+              <View style={styles.subMenuChips}>
+                <Pressable
+                  onPress={() => {
+                    setSelectedLocality(null);
+                    setOpenFilterMenu(null);
+                  }}
                   style={[
-                    styles.filterText,
-                    isActive && styles.filterTextActive,
+                    styles.subChip,
+                    selectedLocality === null && styles.subChipActive,
                   ]}
                 >
-                  {locality}
-                </Text>
-              </Pressable>
-            );
-          })}
+                  <Text
+                    style={[
+                      styles.subChipText,
+                      selectedLocality === null && styles.subChipTextActive,
+                    ]}
+                  >
+                    Todas
+                  </Text>
+                </Pressable>
+
+                {LOCALITY_FILTERS.map((locality) => {
+                  const isSelected = selectedLocality === locality;
+                  return (
+                    <Pressable
+                      key={locality}
+                      onPress={() => {
+                        setSelectedLocality(isSelected ? null : locality);
+                        setOpenFilterMenu(null);
+                      }}
+                      style={[
+                        styles.subChip,
+                        isSelected && styles.subChipActive,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.subChipText,
+                          isSelected && styles.subChipTextActive,
+                        ]}
+                      >
+                        {locality}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          )}
+
+          {openFilterMenu === 'category' && (
+            <View style={styles.subMenuBox}>
+              <Text style={styles.subMenuTitle}>Elige una categoría</Text>
+              <View style={styles.subMenuChips}>
+                <Pressable
+                  onPress={() => {
+                    setSelectedCategory(null);
+                    setOpenFilterMenu(null);
+                  }}
+                  style={[
+                    styles.subChip,
+                    selectedCategory === null && styles.subChipActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.subChipText,
+                      selectedCategory === null && styles.subChipTextActive,
+                    ]}
+                  >
+                    Todas
+                  </Text>
+                </Pressable>
+
+                {categoryOptions.map((category) => {
+                  const isSelected = selectedCategory === category;
+                  return (
+                    <Pressable
+                      key={category}
+                      onPress={() => {
+                        setSelectedCategory(isSelected ? null : category);
+                        setOpenFilterMenu(null);
+                      }}
+                      style={[
+                        styles.subChip,
+                        isSelected && styles.subChipActive,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.subChipText,
+                          isSelected && styles.subChipTextActive,
+                        ]}
+                      >
+                        {category}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          )}
         </View>
 
         <View style={styles.summaryRow}>
@@ -772,9 +967,9 @@ export default function ExploreScreen() {
         ) : (
           <View style={styles.emptyBox}>
             <Text style={styles.emptyText}>
-              {activeFilter === 'Visitados'
+              {quickListMode === 'visited'
                 ? 'Aún no has marcado sitios visitados en tu histórico.'
-                : activeFilter === 'Favoritos'
+                : quickListMode === 'favorites'
                   ? 'Aún no tienes destinos guardados en favoritos.'
                   : 'No encontramos destinos con ese filtro o palabra clave.'}
             </Text>
@@ -1126,12 +1321,16 @@ const styles = StyleSheet.create({
   toastTextWarning: {
     color: '#664d03',
   },
+  authKeyboardRoot: {
+    flex: 1,
+    backgroundColor: '#f4f6f5',
+  },
   authScreenContainer: {
     flexGrow: 1,
     backgroundColor: '#f4f6f5',
     paddingTop: 48,
     paddingHorizontal: 18,
-    paddingBottom: 28,
+    paddingBottom: 64,
     justifyContent: 'flex-start',
   },
   authCard: {
@@ -1180,31 +1379,35 @@ const styles = StyleSheet.create({
   },
   topSessionBar: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
     backgroundColor: '#ffffff',
-    borderRadius: 12,
+    borderRadius: 14,
     paddingVertical: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#dcebe2',
     gap: 10,
   },
-  sessionLabel: {
+  userAvatarCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#d8f3dc',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sessionInfoBox: {
     flex: 1,
+  },
+  sessionLabel: {
     fontSize: 13,
-    fontWeight: '600',
-    color: '#1b4332',
-  },
-  switchAccountButton: {
-    backgroundColor: '#edf6f0',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-  },
-  switchAccountText: {
-    fontSize: 12,
     fontWeight: '700',
     color: '#1b4332',
+  },
+  sessionSubLabel: {
+    fontSize: 11,
+    color: '#52796f',
   },
   noticeBox: {
     backgroundColor: '#fff3cd',
@@ -1230,27 +1433,72 @@ const styles = StyleSheet.create({
     color: '#212529',
     marginBottom: 14,
   },
-  filtersRow: {
+  filtersSection: {
+    marginBottom: 12,
+    gap: 8,
+  },
+  filterTabsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
-    marginBottom: 12,
   },
-  filterChip: {
-    backgroundColor: '#e9ecef',
-    paddingVertical: 8,
+  filterTabBtn: {
+    flexGrow: 1,
+    minWidth: '46%',
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#d0ddd5',
+    paddingVertical: 10,
     paddingHorizontal: 12,
-    borderRadius: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  filterChipActive: {
+  filterTabBtnActive: {
+    backgroundColor: '#1b4332',
+    borderColor: '#1b4332',
+  },
+  filterTabText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1b4332',
+  },
+  filterTabTextActive: {
+    color: '#ffffff',
+  },
+  subMenuBox: {
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#c8ddd0',
+    borderRadius: 14,
+    padding: 12,
+    gap: 8,
+  },
+  subMenuTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#2d6a4f',
+  },
+  subMenuChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  subChip: {
+    backgroundColor: '#eef5f0',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+  },
+  subChipActive: {
     backgroundColor: '#1b4332',
   },
-  filterText: {
-    fontSize: 13,
-    color: '#212529',
-    fontWeight: '500',
+  subChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1b4332',
   },
-  filterTextActive: {
+  subChipTextActive: {
     color: '#ffffff',
   },
   summaryRow: {
